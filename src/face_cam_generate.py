@@ -1,16 +1,30 @@
-from datetime import datetime
-import pytz
-import time
-import os
-import pandas as pd
-import numpy as np
-import pickle as Pickle
-import cv2
-import skimage.io
-import skimage.transform
-import tensorflow as tf
+import matplotlib.pyplot as plt
 
 
+def load_image( path ):
+    try:
+        img = skimage.io.imread( path ).astype( float )
+    except:
+        return None
+
+    if img is None: return None
+    if len(img.shape) < 2: return None
+    if len(img.shape) == 4: return None
+    if len(img.shape) == 2: img=np.tile(img[:,:,None], 3)
+    if img.shape[2] == 4: img=img[:,:,:3]
+    if img.shape[2] > 4: return None
+
+    img /= 255.
+
+    short_edge = min( img.shape[:2] )
+    yy = int((img.shape[0] - short_edge) / 2)
+    xx = int((img.shape[1] - short_edge) / 2)
+    crop_img = img[yy:yy+short_edge, xx:xx+short_edge]
+    resized_img = skimage.transform.resize( crop_img, [224,224] , mode='constant')     #resize the image here
+    return resized_img   
+
+
+#CAM class
 class Detector():
     def __init__(self, weight_file_path, n_labels):
         self.image_mean = [103.939, 116.779, 123.68]
@@ -195,3 +209,73 @@ class Detector():
         classmap = tf.reshape( classmap, [-1, 224,224] )
         return classmap
 
+        
+saved_model_name_testing = 'model-1-1'
+num_cam_images = 10                         # Number of images randomly selected for which we are producing the CAM
+
+testset = pd.read_pickle(trainset_path)#[::-1][:20]
+label_dict = pd.read_pickle(label_dict_path)
+n_labels = 44
+random_selection = np.random.randint(0, len(testset) - batch_size , size=num_cam_images)
+
+graph = tf.Graph()
+with graph.as_default():
+    images_tf = tf.placeholder( tf.float32, [None, 224, 224, 3], name="images")
+    labels_tf = tf.placeholder( tf.int64, [None, 44], name='labels')
+
+    detector = Detector(weight_path,n_labels)
+    c1,c2,c3,c4,conv5, conv6, gap, output = detector.inference(images_tf )
+
+    saver = tf.train.Saver()
+    
+    classmap = detector.get_classmap( labels_tf, conv6 )
+
+with tf.Session(graph=graph) as sess:    
+    
+    saver.restore( sess, os.path.join( model_path, saved_model_name_testing) )
+
+    for start, end in zip(random_selection,list(random_selection + batch_size)):
+        current_data = testset[start:end]
+        current_image_paths = current_data['image_path'].values
+        current_images = np.array(map(lambda x: load_image(x), current_image_paths))
+
+        good_index = np.array(map(lambda x: x is not None, current_images))
+
+        current_data = current_data[good_index]
+        current_image_paths = current_image_paths[good_index]
+        current_images = np.stack(current_images[good_index])
+        current_labels = current_data['label'].values
+        current_label_names = current_data['label_name'].values
+
+        conv6_val, output_val = sess.run(
+                [conv6, output],
+                feed_dict={
+                    images_tf: current_images
+                    })
+
+        classmap_vals = sess.run(
+                classmap,
+                feed_dict={
+                    labels_tf: label_predictions,
+                    conv6: conv6_val
+                    })
+
+        classmap_answer = sess.run(
+                classmap,
+                feed_dict={
+                    labels_tf: current_labels,
+                    conv6: conv6_val
+                    })
+
+        classmap_vis = map(lambda x: ((x-x.min())/(x.max()-x.min())), classmap_answer)
+
+        for vis, ori,ori_path, l_name in zip(classmap_vis, current_images, current_image_paths, current_label_names):
+            print (l_name)
+            plt.imshow( ori )
+            plt.imshow( vis, cmap=plt.cm.jet, alpha=0.5, interpolation='nearest' )
+            plt.show()
+
+            #vis_path = '/path/'+ ori_path.split('/')[-1]
+            #vis_path_ori = '/path/'+ori_path.split('/')[-1].split('.')[0]+'.ori.jpg'
+            #skimage.io.imsave( vis_path, vis )
+            #skimage.io.imsave( vis_path_ori, ori )
